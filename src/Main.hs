@@ -5,6 +5,7 @@ module Main where
 import Control.Monad
 import Control.Monad.Except
 import Control.Monad.State
+import Data.List
 import Data.Maybe
 import System.Console.GetOpt
 import System.IO
@@ -32,6 +33,13 @@ instance Show Exp where
 -- | Construct Church numeral
 number :: Integer -> Exp
 number n = Lam (Lam (foldr App (Var 1) [Var 2 | _ <- [1..n]]))
+
+-- | Pattern match Booleans
+toBool :: Exp -> Maybe Bool
+toBool exp
+  | exp == number 0  = Just False
+  | exp == toExp 'K' = Just True
+  | otherwise = Nothing
 
 -- | Pattern match Church numerals
 toNum :: Exp -> Maybe Integer
@@ -76,18 +84,19 @@ newtype OFC a = OFC { unOFC :: StateT [Exp] IO a }
   deriving (Functor, Applicative, Monad, MonadState [Exp], MonadIO)
 
 -- | Parse arguments and source, evaluate program and print results
-runSrc :: [String] -> String -> IO ()
-runSrc as e = withRight (zipWithM parseInput [0..] as) $ \inputs ->
+runSrc :: Bool -> [String] -> String -> IO ()
+runSrc bool as e = withRight (zipWithM parseInput [0..] as) $ \inputs ->
   withRight (mapM readEither $ words e) $ \prog -> do
     stack' <- execStateT (unOFC $ mapM_ evalInstr prog) []
     let stack = reverse inputs ++ stack'
         exp = simplify $ foldr (flip App) (Lam $ Var 1) stack
-        num = maybe "" nstr (toNum exp)
+        typ | bool      = maybe "" (tstr "Boolean") (toBool exp)
+            | otherwise = maybe "" (tstr "Church numeral") (toNum exp)
     hPutStrLn stderr "Final stack: "
     mapM_ (hPutStrLn stderr.show') stack
-    putStrLn $ "Final expression: " ++ show exp ++ num
+    putStrLn $ "Final expression: " ++ show exp ++ typ
 
-  where nstr n = " (Church numeral: " ++ show n ++ ")"
+  where tstr t n = " (" ++ t ++ ": " ++ show n ++ ")"
         show' (App a b@(App _ _)) = show' a ++ " (" ++ show' b ++ ")"
         show' (App a b) = show' a ++ " " ++ show' b
         show' l@(Lam _)
@@ -137,9 +146,10 @@ toExp :: Char -> Exp
 toExp c = snd . head $ filter ((c==).fst) combinators
 
 
--- | Parse an expression and convert to a program (first argument ignored)
-asm :: [String] -> String -> IO ()
-asm _ = either (hPutStrLn stderr) (print . convertXs . toXs) . parseInput 0
+-- | Parse an expression and convert to a program (first 2 arguments ignored)
+asm :: Bool -> [String] -> String -> IO ()
+asm _ _ = either (hPutStrLn stderr)
+               (putStrLn . pretty . convertXs . toXs) . parseInput 0
   where
     toXs = go
       where go l@(Lam a)
@@ -172,22 +182,26 @@ asm _ = either (hPutStrLn stderr) (print . convertXs . toXs) . parseInput 0
             go n X = [n]
             go _ _ = error "won't happen"
 
+    pretty = intercalate " " . map show
+
 
 -- | Parse command-line arguments and let the fun begin
 main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
-  (args,rem,[]) -> evalOpts (foldr ($) (runSrc,Nothing) args) rem
+  (args,rem,[]) -> evalOpts (foldr ($) (runSrc,Nothing,False) args) rem
   (_,_,err)     -> die (concat err)
 
   where options = [ Option "e" ["expr"] (ReqArg setExpr "EXPR") "specify source"
                   , Option "a" ["asm"] (NoArg setAsm) "translate expression to source"
+                  , Option "b" ["bool"] (NoArg setBool) "interpret output type as a boolean"
                   ]
-        setExpr s (f,_) = (f,Just s)
-        setAsm (_,s) = (asm,s)
+        setAsm (_,s,b) = (asm,s,b)
+        setBool (f,s,_) = (f,s,True)
+        setExpr s (f,_,b) = (f,Just s,b)
 
         die s   = ioError.userError $ s ++ "\n" ++ usageInfo usage options
-        usage   = "usage: xoisc [-a] [-e EXPR | FILE] [INPUTS]\n"
+        usage   = "usage: xoisc [-a | -b] [-e EXPR | FILE] [INPUTS]\n"
 
-        evalOpts (f,Just e) as      = f as e
-        evalOpts (f,Nothing) (a:as) = openFile a ReadMode >>= hGetContents >>= f as
-        evalOpts _ _                = die "argument FILE required\n"
+        evalOpts (f,Just e,b) as      = f b as e
+        evalOpts (f,Nothing,b) (a:as) = openFile a ReadMode >>= hGetContents >>= f b as
+        evalOpts _ _                  = die "argument FILE required\n"
