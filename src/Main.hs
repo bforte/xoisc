@@ -1,12 +1,9 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving,LambdaCase #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main where
 
 import Control.Monad
-import Control.Monad.Except
-import Control.Monad.State
-import Data.List
-import Data.Maybe
+import Control.Monad.State as ST
 import System.Console.GetOpt
 import System.IO
 import System.Environment
@@ -79,16 +76,11 @@ simplify e
                 incFree _ X = X
 
 
--- | Monad wrapper for a One-Function-Computer computation
-newtype OFC a = OFC { unOFC :: StateT [Exp] IO a }
-  deriving (Functor, Applicative, Monad, MonadState [Exp], MonadIO)
-
 -- | Parse arguments and source, evaluate program and print results
 runSrc :: Bool -> [String] -> String -> IO ()
 runSrc bool as e = withRight (zipWithM parseInput [0..] as) $ \inputs ->
   withRight (mapM readEither $ words e) $ \prog -> do
-    stack' <- execStateT (unOFC $ mapM_ evalInstr prog) []
-    let stack = reverse inputs ++ stack'
+    let stack = reverse inputs ++ execState (mapM_ evalInstr prog) []
         exp = simplify $ foldr (flip App) (Lam $ Var 1) stack
         typ | bool      = maybe "" (tstr "Boolean") (toBool exp)
             | otherwise = maybe "" (tstr "Church numeral") (toNum exp)
@@ -105,7 +97,7 @@ runSrc bool as e = withRight (zipWithM parseInput [0..] as) $ \inputs ->
         show' x = show x
 
 -- | Evaluate a single instruction
-evalInstr :: Int -> OFC ()
+evalInstr :: Int -> ST.State [Exp] ()
 evalInstr n = do
   (top,bot) <- splitAt n <$> get
   put $ foldl (flip App) (toExp 'X') top : bot
@@ -149,7 +141,7 @@ toExp c = snd . head $ filter ((c==).fst) combinators
 -- | Parse an expression and convert to a program (first 2 arguments ignored)
 asm :: Bool -> [String] -> String -> IO ()
 asm _ _ = either (hPutStrLn stderr)
-               (putStrLn . pretty . convertXs . toXs) . parseInput 0
+               (putStrLn . unwords . map show . convertXs . toXs) . parseInput 0
   where
     toXs = go
       where go l@(Lam a)
@@ -181,8 +173,6 @@ asm _ _ = either (hPutStrLn stderr)
       where go n (App a b) = go 0 a ++ go (n+1) b
             go n X = [n]
             go _ _ = error "won't happen"
-
-    pretty = intercalate " " . map show
 
 
 -- | Parse command-line arguments and let the fun begin
